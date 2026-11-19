@@ -1,0 +1,67 @@
+name: Scheduled feature push
+
+on:
+  schedule:
+    - cron: "0 */2 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scheduled-feature-push-main
+  cancel-in-progress: false
+
+jobs:
+  push-next-feature:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Cherry-pick and push the next feature commit
+        shell: bash
+        env:
+          START_AT_UTC: "2026-11-19T12:00:00Z"
+          PLAN_BRANCH: scheduled-history
+          TOTAL_COMMITS: "40"
+        run: |
+          set -euo pipefail
+
+          start_epoch="$(date -u -d "$START_AT_UTC" +%s)"
+          now_epoch="$(date -u +%s)"
+          if [ "$now_epoch" -lt "$start_epoch" ]; then
+            echo "Scheduled rollout starts at $START_AT_UTC; skipping this run."
+            exit 0
+          fi
+
+          git fetch origin "$PLAN_BRANCH:refs/remotes/origin/$PLAN_BRANCH"
+
+          current_sequence="$(
+            git log -1 --format=%B |
+              sed -n "s/^Schedule-Sequence: \\([0-9][0-9]*\\)\\/$TOTAL_COMMITS$/\\1/p" |
+              tail -n 1
+          )"
+          current_sequence="${current_sequence:-0}"
+          if [ "$current_sequence" -ge "$TOTAL_COMMITS" ]; then
+            echo "All $TOTAL_COMMITS scheduled feature commits have been pushed."
+            exit 0
+          fi
+
+          next_sequence=$((current_sequence + 1))
+          source_commit="$(
+            git log "origin/$PLAN_BRANCH" --format=%H \
+              --grep="^Schedule-Sequence: $next_sequence/$TOTAL_COMMITS$" |
+              head -n 1
+          )"
+          if [ -z "$source_commit" ]; then
+            echo "No planned commit found for sequence $next_sequence/$TOTAL_COMMITS." >&2
+            exit 1
+          fi
+
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            cherry-pick "$source_commit"
+          git push origin HEAD:main
